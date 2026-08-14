@@ -64,44 +64,58 @@ function pcmToWav(
   return Buffer.concat([header, pcm]);
 }
 
-export async function POST(request: Request) {
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods":
+    "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type",
+};
+
+async function generateSpeech(text: string) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    return Response.json(
+      {
+        error:
+          "GEMINI_API_KEY is not configured.",
+      },
+      {
+        status: 500,
+        headers: corsHeaders,
+      },
+    );
+  }
+
+  const cleanText = text.trim();
+
+  if (!cleanText) {
+    return Response.json(
+      {
+        error:
+          "Please provide some text to speak.",
+      },
+      {
+        status: 400,
+        headers: corsHeaders,
+      },
+    );
+  }
+
+  if (cleanText.length > 12000) {
+    return Response.json(
+      {
+        error: "Text is too long.",
+      },
+      {
+        status: 400,
+        headers: corsHeaders,
+      },
+    );
+  }
+
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      return Response.json(
-        {
-          error:
-            "GEMINI_API_KEY is not configured.",
-        },
-        { status: 500 },
-      );
-    }
-
-    const body = await request.json();
-
-    const text =
-      typeof body?.text === "string"
-        ? body.text.trim()
-        : "";
-
-    if (!text) {
-      return Response.json(
-        {
-          error:
-            "Please provide some text to speak.",
-        },
-        { status: 400 },
-      );
-    }
-
-    if (text.length > 12000) {
-      return Response.json(
-        { error: "Text is too long." },
-        { status: 400 },
-      );
-    }
-
     const geminiResponse = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/interactions",
       {
@@ -123,7 +137,7 @@ export async function POST(request: Request) {
             "or rewrite anything. " +
             "Use a natural, relaxed contemporary Australian English delivery.\n\n" +
             "TRANSCRIPT:\n" +
-            text,
+            cleanText,
 
           response_format: {
             type: "audio",
@@ -157,7 +171,10 @@ export async function POST(request: Request) {
           status: geminiResponse.status,
           details: errorText,
         },
-        { status: 502 },
+        {
+          status: 502,
+          headers: corsHeaders,
+        },
       );
     }
 
@@ -177,7 +194,10 @@ export async function POST(request: Request) {
           error:
             "Gemini returned no audio.",
         },
-        { status: 502 },
+        {
+          status: 502,
+          headers: corsHeaders,
+        },
       );
     }
 
@@ -192,10 +212,19 @@ export async function POST(request: Request) {
       status: 200,
 
       headers: {
-        "Content-Type": "audio/wav",
+        ...corsHeaders,
+
+        "Content-Type":
+          "audio/wav",
+
         "Content-Length":
           String(wav.length),
-        "Cache-Control": "no-store",
+
+        "Cache-Control":
+          "no-store",
+
+        "Content-Disposition":
+          'inline; filename="voice.wav"',
       },
     });
   } catch (error) {
@@ -209,7 +238,49 @@ export async function POST(request: Request) {
         error:
           "Unable to generate speech.",
       },
-      { status: 500 },
+      {
+        status: 500,
+        headers: corsHeaders,
+      },
     );
   }
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+
+  const text =
+    url.searchParams.get("text") || "";
+
+  return generateSpeech(text);
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+
+    const text =
+      typeof body?.text === "string"
+        ? body.text
+        : "";
+
+    return generateSpeech(text);
+  } catch {
+    return Response.json(
+      {
+        error: "Invalid JSON request.",
+      },
+      {
+        status: 400,
+        headers: corsHeaders,
+      },
+    );
+  }
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
 }
