@@ -220,7 +220,7 @@ async function generateSpeech(
 
           body: JSON.stringify({
             model:
-              "gemini-3.1-flash-preview-tts",
+              "gemini-2.5-flash-preview-tts",
 
             input:
               "Generate speech from the transcript below. " +
