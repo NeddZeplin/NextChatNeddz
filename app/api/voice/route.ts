@@ -1,17 +1,27 @@
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type GeminiAudio = {
+type AudioBlock = {
   type?: string;
   data?: string;
   mime_type?: string;
+  sample_rate?: number;
+  channels?: number;
 };
 
-function findAudio(response: any): GeminiAudio | null {
+function findAudio(response: any): AudioBlock | null {
+  // Google SDK-style convenience field.
+  if (response?.output_audio?.data) {
+    return response.output_audio;
+  }
+
+  // Raw REST Interactions API response.
   const steps = Array.isArray(response?.steps) ? response.steps : [];
 
   for (let i = steps.length - 1; i >= 0; i--) {
-    const content = Array.isArray(steps[i]?.content) ? steps[i].content : [];
+    const content = Array.isArray(steps[i]?.content)
+      ? steps[i].content
+      : [];
 
     for (const item of content) {
       if (item?.type === "audio" && item?.data) {
@@ -35,8 +45,11 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
+
     const text =
-      typeof body?.text === "string" ? body.text.trim() : "";
+      typeof body?.text === "string"
+        ? body.text.trim()
+        : "";
 
     if (!text) {
       return Response.json(
@@ -64,9 +77,10 @@ export async function POST(request: Request) {
           model: "gemini-3.1-flash-tts-preview",
 
           input:
-            "Read the following text exactly as written. " +
-            "Do not add, remove, summarise, rephrase, or answer it. " +
-            "Use a natural, relaxed contemporary Australian English speaking style.\n\n" +
+            "Speak the text below exactly as written. " +
+            "Do not answer it, rewrite it, summarise it, " +
+            "or add any introductory or closing words. " +
+            "Use a natural, relaxed contemporary Australian English voice.\n\n" +
             text,
 
           response_format: {
@@ -100,6 +114,7 @@ export async function POST(request: Request) {
         {
           error: "Gemini could not generate speech.",
           status: geminiResponse.status,
+          details: errorText,
         },
         { status: 502 },
       );
@@ -109,7 +124,10 @@ export async function POST(request: Request) {
     const audio = findAudio(result);
 
     if (!audio?.data) {
-      console.error("No audio returned by Gemini:", result);
+      console.error(
+        "Gemini returned no audio:",
+        JSON.stringify(result),
+      );
 
       return Response.json(
         { error: "Gemini returned no audio." },
@@ -117,13 +135,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const audioBuffer = Buffer.from(audio.data, "base64");
+    const audioBuffer = Buffer.from(
+      audio.data,
+      "base64",
+    );
 
     return new Response(audioBuffer, {
       status: 200,
       headers: {
-        "Content-Type": audio.mime_type || "audio/wav",
-        "Content-Length": String(audioBuffer.length),
+        "Content-Type":
+          audio.mime_type || "audio/wav",
+        "Content-Length":
+          String(audioBuffer.length),
         "Cache-Control": "no-store",
       },
     });
