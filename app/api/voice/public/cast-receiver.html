@@ -1,0 +1,390 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ChatGPT Voice Receiver</title>
+
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+    }
+  </style>
+</head>
+
+<body>
+<script>
+(() => {
+  "use strict";
+
+  const NAMESPACE =
+    "urn:x-cast:com.neddz.chatgpt";
+
+  const MAX_AUDIO_BYTES =
+    4 * 1024 * 1024;
+
+  const context =
+    cast.framework.CastReceiverContext.getInstance();
+
+  let audioContext = null;
+
+  let audioChunks = [];
+  let totalAudioBytes = 0;
+  let incomingSampleRate = 48000;
+
+  function sendStatus(
+    senderId,
+    type,
+    extra = {},
+  ) {
+    try {
+      context.sendCustomMessage(
+        NAMESPACE,
+        senderId,
+        {
+          type,
+          ...extra,
+        },
+      );
+    } catch (error) {
+      console.error(
+        "Could not send status:",
+        error,
+      );
+    }
+  }
+
+  function getAudioContext() {
+    if (!audioContext) {
+      const AudioContextClass =
+        window.AudioContext ||
+        window.webkitAudioContext;
+
+      if (!AudioContextClass) {
+        throw new Error(
+          "Web Audio API is unavailable.",
+        );
+      }
+
+      audioContext =
+        new AudioContextClass({
+          sampleRate: 48000,
+        });
+    }
+
+    if (audioContext.state === "suspended") {
+      audioContext.resume();
+    }
+
+    return audioContext;
+  }
+
+  function decodeBase64(base64) {
+    const binary = atob(base64);
+
+    const bytes =
+      new Uint8Array(binary.length);
+
+    for (
+      let i = 0;
+      i < binary.length;
+      i++
+    ) {
+      bytes[i] =
+        binary.charCodeAt(i);
+    }
+
+    return bytes;
+  }
+
+  function combineChunks() {
+    const combined =
+      new Uint8Array(totalAudioBytes);
+
+    let offset = 0;
+
+    for (const chunk of audioChunks) {
+      combined.set(
+        chunk,
+        offset,
+      );
+
+      offset +=
+        chunk.byteLength;
+    }
+
+    return combined;
+  }
+
+  async function playPCM(
+    pcmBytes,
+    sampleRate,
+  ) {
+    const ctx =
+      getAudioContext();
+
+    if (ctx.state === "suspended") {
+      await ctx.resume();
+    }
+
+    const sampleCount =
+      Math.floor(
+        pcmBytes.byteLength / 2,
+      );
+
+    const audioBuffer =
+      ctx.createBuffer(
+        1,
+        sampleCount,
+        sampleRate,
+      );
+
+    const channel =
+      audioBuffer.getChannelData(0);
+
+    const view =
+      new DataView(
+        pcmBytes.buffer,
+        pcmBytes.byteOffset,
+        pcmBytes.byteLength,
+      );
+
+    for (
+      let i = 0;
+      i < sampleCount;
+      i++
+    ) {
+      const sample =
+        view.getInt16(
+          i * 2,
+          true,
+        );
+
+      channel[i] =
+        sample < 0
+          ? sample / 32768
+          : sample / 32767;
+    }
+
+    const source =
+      ctx.createBufferSource();
+
+    source.buffer =
+      audioBuffer;
+
+    source.connect(
+      ctx.destination,
+    );
+
+    source.start();
+
+    return new Promise(
+      (resolve) => {
+        source.onended =
+          resolve;
+      },
+    );
+  }
+
+  function resetIncomingAudio() {
+    audioChunks = [];
+    totalAudioBytes = 0;
+    incomingSampleRate = 48000;
+  }
+
+  context.addCustomMessageListener(
+    NAMESPACE,
+    async (event) => {
+      try {
+        let message =
+          event.data;
+
+        if (
+          typeof message === "string"
+        ) {
+          message =
+            JSON.parse(message);
+        }
+
+        if (
+          !message ||
+          typeof message !== "object"
+        ) {
+          return;
+        }
+
+        switch (message.type) {
+          case "ping": {
+            getAudioContext();
+
+            sendStatus(
+              event.senderId,
+              "ready",
+            );
+
+            break;
+          }
+
+          case "audio_start": {
+            resetIncomingAudio();
+
+            if (
+              Number.isFinite(
+                message.sampleRate,
+              )
+            ) {
+              incomingSampleRate =
+                Number(
+                  message.sampleRate,
+                );
+            }
+
+            sendStatus(
+              event.senderId,
+              "audio_ready",
+            );
+
+            break;
+          }
+
+          case "audio_chunk": {
+            if (
+              typeof message.data !==
+              "string"
+            ) {
+              throw new Error(
+                "Audio chunk has no data.",
+              );
+            }
+
+            const chunk =
+              decodeBase64(
+                message.data,
+              );
+
+            totalAudioBytes +=
+              chunk.byteLength;
+
+            if (
+              totalAudioBytes >
+              MAX_AUDIO_BYTES
+            ) {
+              resetIncomingAudio();
+
+              throw new Error(
+                "Audio message is too large.",
+              );
+            }
+
+            audioChunks.push(
+              chunk,
+            );
+
+            break;
+          }
+
+          case "audio_end": {
+            if (
+              totalAudioBytes === 0
+            ) {
+              throw new Error(
+                "No audio was received.",
+              );
+            }
+
+            const pcm =
+              combineChunks();
+
+            audioChunks = [];
+            totalAudioBytes = 0;
+
+            sendStatus(
+              event.senderId,
+              "audio_received",
+            );
+
+            const ctx =
+              getAudioContext();
+
+            if (
+              ctx.state ===
+              "suspended"
+            ) {
+              await ctx.resume();
+            }
+
+            sendStatus(
+              event.senderId,
+              "playing",
+            );
+
+            await playPCM(
+              pcm,
+              incomingSampleRate,
+            );
+
+            sendStatus(
+              event.senderId,
+              "finished",
+            );
+
+            break;
+          }
+
+          case "reset": {
+            resetIncomingAudio();
+
+            sendStatus(
+              event.senderId,
+              "reset_done",
+            );
+
+            break;
+          }
+        }
+      } catch (error) {
+        console.error(
+          "Receiver error:",
+          error,
+        );
+
+        resetIncomingAudio();
+
+        sendStatus(
+          event.senderId,
+          "error",
+          {
+            message:
+              String(
+                error?.message ||
+                error,
+              ),
+          },
+        );
+      }
+    },
+  );
+
+  const options =
+    new cast.framework.CastReceiverOptions();
+
+  /*
+   * We are using a custom message channel
+   * rather than normal media LOAD requests.
+   */
+  options.disableIdleTimeout =
+    true;
+
+  context.start(options);
+
+  console.log(
+    "ChatGPT Cast receiver ready.",
+  );
+})();
+</script>
+</body>
+</html>
